@@ -1,17 +1,16 @@
 #![cfg(feature = "test-bpf")]
 use std::str::FromStr;
 
-use solana_program::{hash::Hash,
-    pubkey::Pubkey,
-    rent::Rent,
-    sysvar,
-    system_program
-};
+use solana_program::{hash::Hash, pubkey::Pubkey, rent::Rent, sysvar, system_program, msg};
+use solana_program::instruction::InstructionError;
 use solana_program_test::{processor, ProgramTest};
 use solana_sdk::{account::Account, keyed_account, signature::Keypair, signature::Signer, system_instruction, transaction::Transaction};
+use solana_sdk::program_pack::Pack;
+use solana_sdk::transaction::TransactionError;
 use token_vesting::{entrypoint::process_instruction, instruction::Schedule};
-use token_vesting::instruction::{init, unlock, change_destination, create};
-use spl_token::{self, instruction::{initialize_mint, initialize_account, mint_to}};
+use token_vesting::instruction::{init, unlock, change_destination, create, purge};
+use spl_token::{self, instruction::{initialize_mint, initialize_account, mint_to}, state};
+use token_vesting::state::{VestingSchedule, VestingScheduleHeader};
 
 #[tokio::test]
 async fn test_token_vesting() {
@@ -29,6 +28,9 @@ async fn test_token_vesting() {
 
     let new_destination_account = Keypair::new();
     let new_destination_token_account = Keypair::new();
+
+    let vesting_admin_account = Keypair::new();
+    let vesting_admin_token_account = Keypair::new();
 
     let mut seeds = [42u8; 32];
     let (vesting_account_key, bump) = Pubkey::find_program_address(&[&seeds[..31]], &program_id);
@@ -50,30 +52,32 @@ async fn test_token_vesting() {
         },
     );
 
+    program_test.add_account(
+        vesting_admin_account.pubkey(),
+        Account {
+            lamports: 5000000,
+            ..Account::default()
+        },
+    );
+
+    program_test.add_account(
+        vesting_account_key,
+        Account{
+            lamports: 500000,
+            data: vec![0; VestingScheduleHeader::LEN + VestingSchedule::LEN * 3],
+            owner: program_id,
+            executable: false,
+            rent_epoch: 0
+        }
+    );
+
     // Start and process transactions on the test network
-    let (mut banks_client, payer, recent_blockhash) = program_test.start().await;
+    let mut program_test_context = program_test.start_with_context().await;
+    let mut banks_client = program_test_context.banks_client;
+    let payer = program_test_context.payer;
+    let recent_blockhash = program_test_context.last_blockhash;
 
-    // Initialize the vesting program account
-    let init_instruction = [init(
-        &system_program::id(),
-        &sysvar::rent::id(),
-        &program_id,
-        &payer.pubkey(),
-        &vesting_account_key,
-        seeds,
-        3
-    ).unwrap()
-    ];
-    let mut init_transaction = Transaction::new_with_payer(
-        &init_instruction,
-        Some(&payer.pubkey()),
-    );
-    init_transaction.partial_sign(
-        &[&payer],
-        recent_blockhash
-    );
-    banks_client.process_transaction(init_transaction).await.unwrap();
-
+    let start_time = banks_client.get_clock().await.unwrap().unix_timestamp as u64;
 
     // Initialize the token accounts
     banks_client.process_transaction(mint_init_transaction(
@@ -95,7 +99,9 @@ async fn test_token_vesting() {
     banks_client.process_transaction(
         create_token_account(&payer, &mint, recent_blockhash, &new_destination_token_account, &new_destination_account.pubkey())
     ).await.unwrap();
-
+    banks_client.process_transaction(
+        create_token_account(&payer, &mint, recent_blockhash, &vesting_admin_token_account, &vesting_admin_account.pubkey())
+    ).await.unwrap();
 
     // Create and process the vesting transactions
     let setup_instructions = [
@@ -109,10 +115,11 @@ async fn test_token_vesting() {
         ).unwrap()
     ];
 
+    let total_amount = 60;
     let schedules = vec![
-        Schedule {amount: 20, release_time: 0},
-        Schedule {amount: 20, release_time: 2},
-        Schedule {amount: 20, release_time: 5}
+        Schedule {amount: total_amount / 3, release_time: start_time},
+        Schedule {amount: total_amount / 3, release_time: start_time + 60000},
+        Schedule {amount: total_amount / 3, release_time: start_time + 80000}
     ];
 
     let test_instructions = [
@@ -125,8 +132,10 @@ async fn test_token_vesting() {
             &source_token_account.pubkey(),
             &destination_token_account.pubkey(),
             &mint.pubkey(),
+            &vesting_admin_account.pubkey(),
             schedules,
-            seeds.clone()
+            seeds.clone(),
+            2
         ).unwrap(),
         unlock(
             &program_id,
@@ -143,9 +152,20 @@ async fn test_token_vesting() {
         change_destination(
             &program_id,
             &vesting_account_key,
-            &destination_account.pubkey(),
-            &destination_token_account.pubkey(),
+            &vesting_admin_account.pubkey(),
             &new_destination_token_account.pubkey(),
+            seeds.clone()
+        ).unwrap()
+    ];
+
+    let purge_instructions = [
+        purge(
+            &program_id,
+            &spl_token::id(),
+            &vesting_account_key,
+            &vesting_admin_account.pubkey(),
+            &vesting_token_account.pubkey(),
+            &vesting_admin_token_account.pubkey(),
             seeds.clone()
         ).unwrap()
     ];
@@ -173,12 +193,31 @@ async fn test_token_vesting() {
     test_transaction.partial_sign(
         &[
             &payer,
-            &source_account
+            &source_account,
+            &vesting_admin_account
             ], 
         recent_blockhash
     );
     
     banks_client.process_transaction(test_transaction).await.unwrap();
+
+    let vesting_account = banks_client.get_account(vesting_account_key).await.unwrap().unwrap();
+    let vesting_state = VestingScheduleHeader::unpack(&vesting_account.data[..VestingScheduleHeader::LEN]).unwrap();
+    if vesting_state.vesting_admin != vesting_admin_account.pubkey() {
+        panic!("Vesting admin is not set");
+    }
+    if vesting_state.destination_address != destination_token_account.pubkey() {
+        panic!("Destination account is not set properly")
+    }
+    if vesting_state.cliff != 2 {
+        panic!("Vesting state cliff is not set");
+    }
+    if !vesting_state.is_initialized {
+        panic!("Vesting state is not initialized");
+    }
+    if vesting_state.is_purged {
+        panic!("Vesting state is purged");
+    }
     
     let mut change_destination_transaction = Transaction::new_with_payer(
         &change_destination_instructions, 
@@ -188,13 +227,129 @@ async fn test_token_vesting() {
     change_destination_transaction.partial_sign(
         &[
             &payer,
-            &destination_account
+            &vesting_admin_account
         ], 
         recent_blockhash
     );
 
     banks_client.process_transaction(change_destination_transaction).await.unwrap();
-    
+
+    let vesting_account = banks_client.get_account(vesting_account_key).await.unwrap().unwrap();
+    let vesting_state = VestingScheduleHeader::unpack(&vesting_account.data[..VestingScheduleHeader::LEN]).unwrap();
+    if vesting_state.vesting_admin != vesting_admin_account.pubkey() {
+        panic!("Vesting admin is not set");
+    }
+    if vesting_state.destination_address != new_destination_token_account.pubkey() {
+        panic!("New destination is not set properly");
+    }
+    if vesting_state.cliff != 2 {
+        panic!("Vesting state cliff is not set");
+    }
+    if !vesting_state.is_initialized {
+        panic!("Vesting state is not initialized");
+    }
+    if vesting_state.is_purged {
+        panic!("Vesting state is purged");
+    }
+
+
+    let mut purge_transaction = Transaction::new_with_payer(
+        &purge_instructions,
+        Some(&payer.pubkey())
+    );
+
+    purge_transaction.partial_sign(
+        &[
+            &payer,
+            &vesting_admin_account
+        ],
+        recent_blockhash
+    );
+
+    banks_client.process_transaction(purge_transaction).await.unwrap();
+
+    let vesting_account = banks_client.get_account(vesting_account_key).await.unwrap().unwrap();
+    let vesting_state = VestingScheduleHeader::unpack(&vesting_account.data[..VestingScheduleHeader::LEN]).unwrap();
+    if vesting_state.vesting_admin != vesting_admin_account.pubkey() {
+        panic!("Vesting admin is not set");
+    }
+    if vesting_state.destination_address != new_destination_token_account.pubkey() {
+        panic!("New destination is not set properly");
+    }
+    if vesting_state.cliff != 2 {
+        panic!("Vesting state cliff is not set");
+    }
+    if !vesting_state.is_initialized {
+        panic!("Vesting state is not initialized");
+    }
+    if !vesting_state.is_purged {
+        panic!("Vesting state is not purged");
+    }
+
+    let admin_token_account = banks_client.get_account(vesting_admin_token_account.pubkey()).await.unwrap().unwrap();
+    let admin_token_account_state = state::Account::unpack(&admin_token_account.data).unwrap();
+    if admin_token_account_state.amount != total_amount - (total_amount / 3) {
+        panic!("Admin token account does not have correct balance. {}", admin_token_account_state.amount);
+    }
+
+    let recent_blockhash = banks_client.get_recent_blockhash().await.unwrap();
+
+    let mut test_transaction = Transaction::new_with_payer(
+        &test_instructions,
+        Some(&payer.pubkey()),
+    );
+    test_transaction.partial_sign(
+        &[
+            &payer,
+            &source_account,
+            &vesting_admin_account
+        ],
+        recent_blockhash
+    );
+
+    let expected_err = banks_client.process_transaction(test_transaction).await.map_err(|e| e.unwrap()).expect_err("It needs to be errored out.");
+    match expected_err {
+        TransactionError::InstructionError(0, inner_err) => {
+            if inner_err != InstructionError::InvalidArgument {
+                panic!("Unexpected error");
+            }
+        }
+        _ => panic!("Unexpected error")
+    }
+
+
+    let test_instructions = [
+        unlock(
+            &program_id,
+            &spl_token::id(),
+            &sysvar::clock::id(),
+            &vesting_account_key,
+            &vesting_token_account.pubkey(),
+            &destination_token_account.pubkey(),
+            seeds.clone()
+        ).unwrap()
+    ];
+
+    let mut test_transaction = Transaction::new_with_payer(
+        &test_instructions,
+        Some(&payer.pubkey()),
+    );
+    test_transaction.partial_sign(
+        &[
+            &payer,
+        ],
+        recent_blockhash
+    );
+
+    let expected_err = banks_client.process_transaction(test_transaction).await.map_err(|e| e.unwrap()).expect_err("It needs to be errored out.");
+    match expected_err {
+        TransactionError::InstructionError(0, inner_err) => {
+            if inner_err != InstructionError::InvalidInstructionData {
+                panic!("Unexpected error");
+            }
+        }
+        _ => panic!("Unexpected error")
+    }
 }
 
 fn mint_init_transaction(

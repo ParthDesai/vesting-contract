@@ -76,6 +76,7 @@ impl Processor {
         mint_address: &Pubkey,
         destination_token_address: &Pubkey,
         schedules: Vec<Schedule>,
+        cliff: u64,
     ) -> ProgramResult {
         let accounts_iter = &mut accounts.iter();
 
@@ -84,6 +85,12 @@ impl Processor {
         let vesting_token_account = next_account_info(accounts_iter)?;
         let source_token_account_owner = next_account_info(accounts_iter)?;
         let source_token_account = next_account_info(accounts_iter)?;
+        let vesting_admin = next_account_info(accounts_iter)?;
+
+        if !vesting_admin.is_signer {
+            msg!("Provided vesting admin account should be signer");
+            return Err(ProgramError::InvalidArgument);
+        }
 
         let vesting_account_key = Pubkey::create_program_address(&[&seeds], program_id)?;
         if vesting_account_key != *vesting_account.key {
@@ -101,9 +108,9 @@ impl Processor {
             return Err(ProgramError::InvalidArgument);
         }
 
+        let vesting_state = VestingScheduleHeader::unpack_unchecked(&vesting_account.data.borrow()[..VestingScheduleHeader::LEN])?;
         // Verifying that no SVC was already created with this seed
-        let is_initialized =
-            vesting_account.try_borrow_data()?[VestingScheduleHeader::LEN - 1] == 1;
+        let is_initialized = vesting_state.is_initialized;
 
         if is_initialized {
             msg!("Cannot overwrite an existing vesting contract.");
@@ -131,6 +138,9 @@ impl Processor {
             destination_address: *destination_token_address,
             mint_address: *mint_address,
             is_initialized: true,
+            is_purged: false,
+            cliff,
+            vesting_admin: *vesting_admin.key,
         };
 
         let mut data = vesting_account.data.borrow_mut();
@@ -142,7 +152,14 @@ impl Processor {
         let mut offset = VestingScheduleHeader::LEN;
         let mut total_amount: u64 = 0;
 
+        let mut current_release_time = cliff;
         for s in schedules.iter() {
+            if current_release_time > s.release_time {
+                msg!("One or more release time of schedule are inconsistent");
+                return Err(ProgramError::InvalidInstructionData);
+            }
+            current_release_time = s.release_time;
+
             let state_schedule = VestingSchedule {
                 release_time: s.release_time,
                 amount: s.amount,
@@ -210,6 +227,11 @@ impl Processor {
         let header_state =
             VestingScheduleHeader::unpack(&packed_state.borrow()[..VestingScheduleHeader::LEN])?;
 
+        if header_state.is_purged {
+            msg!("Purged vesting account cannot be used");
+            return Err(ProgramError::InvalidInstructionData);
+        }
+
         if header_state.destination_address != *destination_token_account.key {
             msg!("Contract destination account does not matched provided account");
             return Err(ProgramError::InvalidArgument);
@@ -267,6 +289,93 @@ impl Processor {
         Ok(())
     }
 
+    pub fn process_purge(
+        program_id: &Pubkey,
+        accounts: &[AccountInfo],
+        seeds: [u8; 32],
+    ) -> ProgramResult {
+        let accounts_iter = &mut accounts.iter();
+
+        let vesting_account = next_account_info(accounts_iter)?;
+        let vesting_admin = next_account_info(accounts_iter)?;
+        let vesting_token_account = next_account_info(accounts_iter)?;
+        let destination_token_account = next_account_info(accounts_iter)?;
+        let spl_token_account = next_account_info(accounts_iter)?;
+
+        if !vesting_admin.is_signer {
+            msg!("vesting admin needs to be signer");
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+
+        if vesting_account.data.borrow().len() < VestingScheduleHeader::LEN {
+            return Err(ProgramError::InvalidAccountData)
+        }
+
+        let vesting_account_key = Pubkey::create_program_address(&[&seeds], program_id)?;
+        if vesting_account_key != *vesting_account.key {
+            msg!("Invalid vesting account key");
+            return Err(ProgramError::InvalidArgument);
+        }
+
+        let state = VestingScheduleHeader::unpack(
+            &vesting_account.data.borrow()[..VestingScheduleHeader::LEN],
+        )?;
+
+        if state.is_purged {
+            msg!("Purged vesting account cannot be purged again");
+            return Err(ProgramError::InvalidArgument);
+        }
+
+        if state.vesting_admin != *vesting_admin.key {
+            msg!("Vesting account admin mismatch");
+            return Err(ProgramError::InvalidArgument);
+        }
+
+        let vesting_token_account_data = Account::unpack(&vesting_token_account.data.borrow())?;
+
+        if vesting_token_account_data.owner != vesting_account_key {
+            msg!("The vesting token account should be owned by the vesting account.");
+            return Err(ProgramError::InvalidArgument);
+        }
+
+        let schedules = unpack_schedules(&vesting_account.data.borrow()[VestingScheduleHeader::LEN..])?;
+
+        let mut amount_to_transfer = 0;
+        // Since the schedule amount is set to 0 once it is paid out, it is fine to directly
+        // sum it up.
+        for schedule in schedules {
+            amount_to_transfer += schedule.amount;
+        }
+
+        let transfer_tokens_from_vesting_account = transfer(
+            &spl_token_account.key,
+            &vesting_token_account.key,
+            destination_token_account.key,
+            &vesting_account_key,
+            &[],
+            amount_to_transfer,
+        )?;
+
+
+        invoke_signed(
+            &transfer_tokens_from_vesting_account,
+            &[
+                spl_token_account.clone(),
+                vesting_token_account.clone(),
+                destination_token_account.clone(),
+                vesting_account.clone(),
+            ],
+            &[&[&seeds]],
+        )?;
+
+        let mut new_state = state;
+        new_state.is_purged = true;
+        new_state
+            .pack_into_slice(&mut vesting_account.data.borrow_mut()[..VestingScheduleHeader::LEN]);
+
+        Ok(())
+    }
+
     pub fn process_change_destination(
         program_id: &Pubkey,
         accounts: &[AccountInfo],
@@ -275,8 +384,7 @@ impl Processor {
         let accounts_iter = &mut accounts.iter();
 
         let vesting_account = next_account_info(accounts_iter)?;
-        let destination_token_account = next_account_info(accounts_iter)?;
-        let destination_token_account_owner = next_account_info(accounts_iter)?;
+        let vesting_admin = next_account_info(accounts_iter)?;
         let new_destination_token_account = next_account_info(accounts_iter)?;
 
         if vesting_account.data.borrow().len() < VestingScheduleHeader::LEN {
@@ -287,25 +395,23 @@ impl Processor {
             &vesting_account.data.borrow()[..VestingScheduleHeader::LEN],
         )?;
 
+        if state.is_purged {
+            msg!("Purged vesting account cannot be used");
+            return Err(ProgramError::InvalidArgument);
+        }
+
         if vesting_account_key != *vesting_account.key {
             msg!("Invalid vesting account key");
             return Err(ProgramError::InvalidArgument);
         }
 
-        if state.destination_address != *destination_token_account.key {
-            msg!("Contract destination account does not matched provided account");
+        if !vesting_admin.is_signer {
+            msg!("Vesting admin should be a signer.");
             return Err(ProgramError::InvalidArgument);
         }
 
-        if !destination_token_account_owner.is_signer {
-            msg!("Destination token account owner should be a signer.");
-            return Err(ProgramError::InvalidArgument);
-        }
-
-        let destination_token_account = Account::unpack(&destination_token_account.data.borrow())?;
-
-        if destination_token_account.owner != *destination_token_account_owner.key {
-            msg!("The current destination token account isn't owned by the provided owner");
+        if state.vesting_admin != *vesting_admin.key {
+            msg!("The vesting account admin mismatch");
             return Err(ProgramError::InvalidArgument);
         }
 
@@ -346,6 +452,7 @@ impl Processor {
                 mint_address,
                 destination_token_address,
                 schedules,
+                cliff,
             } => {
                 msg!("Instruction: Create Schedule");
                 Self::process_create(
@@ -355,6 +462,17 @@ impl Processor {
                     &mint_address,
                     &destination_token_address,
                     schedules,
+                    cliff
+                )
+            },
+            VestingInstruction::Purge {
+                seeds
+            } => {
+                msg!("Instruction: Purge");
+                Self::process_purge(
+                    program_id,
+                    accounts,
+                    seeds
                 )
             }
         }
