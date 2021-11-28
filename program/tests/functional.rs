@@ -1,14 +1,14 @@
 #![cfg(feature = "test-bpf")]
 use std::str::FromStr;
 
-use solana_program::{hash::Hash, pubkey::Pubkey, rent::Rent, sysvar, system_program, msg};
+use solana_program::{hash::Hash, pubkey::Pubkey, rent::Rent, sysvar};
 use solana_program::instruction::InstructionError;
 use solana_program_test::{processor, ProgramTest};
-use solana_sdk::{account::Account, keyed_account, signature::Keypair, signature::Signer, system_instruction, transaction::Transaction};
+use solana_sdk::{account::Account, signature::Keypair, signature::Signer, system_instruction, transaction::Transaction};
 use solana_sdk::program_pack::Pack;
 use solana_sdk::transaction::TransactionError;
 use token_vesting::{entrypoint::process_instruction, instruction::Schedule};
-use token_vesting::instruction::{init, unlock, change_destination, create, purge};
+use token_vesting::instruction::{unlock, change_destination, create, purge};
 use spl_token::{self, instruction::{initialize_mint, initialize_account, mint_to}, state};
 use token_vesting::state::{VestingSchedule, VestingScheduleHeader};
 
@@ -72,7 +72,7 @@ async fn test_token_vesting() {
     );
 
     // Start and process transactions on the test network
-    let mut program_test_context = program_test.start_with_context().await;
+    let program_test_context = program_test.start_with_context().await;
     let mut banks_client = program_test_context.banks_client;
     let payer = program_test_context.payer;
     let recent_blockhash = program_test_context.last_blockhash;
@@ -345,6 +345,52 @@ async fn test_token_vesting() {
     match expected_err {
         TransactionError::InstructionError(0, inner_err) => {
             if inner_err != InstructionError::InvalidInstructionData {
+                panic!("Unexpected error");
+            }
+        }
+        _ => panic!("Unexpected error")
+    }
+
+    let mut change_destination_transaction = Transaction::new_with_payer(
+        &change_destination_instructions,
+        Some(&payer.pubkey())
+    );
+
+    change_destination_transaction.partial_sign(
+        &[
+            &payer,
+            &vesting_admin_account
+        ],
+        recent_blockhash
+    );
+
+    let expected_err = banks_client.process_transaction(change_destination_transaction).await.map_err(|e| e.unwrap()).expect_err("It needs to be errored out.");
+    match expected_err {
+        TransactionError::InstructionError(0, inner_err) => {
+            if inner_err != InstructionError::InvalidArgument {
+                panic!("Unexpected error");
+            }
+        }
+        _ => panic!("Unexpected error")
+    }
+
+    let mut purge_transaction = Transaction::new_with_payer(
+        &purge_instructions,
+        Some(&payer.pubkey())
+    );
+
+    purge_transaction.partial_sign(
+        &[
+            &payer,
+            &vesting_admin_account
+        ],
+        recent_blockhash
+    );
+
+    let expected_err = banks_client.process_transaction(purge_transaction).await.map_err(|e| e.unwrap()).expect_err("It needs to be errored out.");
+    match expected_err {
+        TransactionError::InstructionError(0, inner_err) => {
+            if inner_err != InstructionError::InvalidArgument {
                 panic!("Unexpected error");
             }
         }
