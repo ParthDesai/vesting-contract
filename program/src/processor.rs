@@ -89,7 +89,7 @@ impl Processor {
 
         if !vesting_admin.is_signer {
             msg!("Provided vesting admin account should be signer");
-            return Err(ProgramError::InvalidArgument);
+            return Err(ProgramError::MissingRequiredSignature);
         }
 
         let vesting_account_key = Pubkey::create_program_address(&[&seeds], program_id)?;
@@ -407,7 +407,7 @@ impl Processor {
 
         if !vesting_admin.is_signer {
             msg!("Vesting admin should be a signer.");
-            return Err(ProgramError::InvalidArgument);
+            return Err(ProgramError::MissingRequiredSignature);
         }
 
         if state.vesting_admin != *vesting_admin.key {

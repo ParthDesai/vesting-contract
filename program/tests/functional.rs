@@ -133,7 +133,7 @@ async fn test_token_vesting() {
             &destination_token_account.pubkey(),
             &mint.pubkey(),
             &vesting_admin_account.pubkey(),
-            schedules,
+            schedules.clone(),
             seeds.clone(),
             2
         ).unwrap(),
@@ -185,6 +185,47 @@ async fn test_token_vesting() {
     
     banks_client.process_transaction(setup_transaction).await.unwrap();
 
+    // Try to process transaction without admin sign.
+    let mut invalid_sign_instructions = [
+        create(
+            &program_id,
+            &spl_token::id(),
+            &vesting_account_key,
+            &vesting_token_account.pubkey(),
+            &source_account.pubkey(),
+            &source_token_account.pubkey(),
+            &destination_token_account.pubkey(),
+            &mint.pubkey(),
+            &vesting_admin_account.pubkey(),
+            schedules,
+            seeds.clone(),
+            2
+        ).unwrap(),
+    ];
+    invalid_sign_instructions[0].accounts.last_mut().unwrap().is_signer = false;
+
+    let mut invalid_test_transaction = Transaction::new_with_payer(
+        &invalid_sign_instructions,
+        Some(&payer.pubkey()),
+    );
+    invalid_test_transaction.partial_sign(
+        &[
+            &payer,
+            &source_account,
+        ],
+        recent_blockhash
+    );
+
+    let expected_err = banks_client.process_transaction(invalid_test_transaction).await.map_err(|e| e.unwrap()).expect_err("Transaction cannot be processed.");
+    match expected_err {
+        TransactionError::InstructionError(0, inner_err) => {
+            if inner_err != InstructionError::MissingRequiredSignature {
+                panic!("Expected Missing signature error, found: {:?}", inner_err);
+            }
+        }
+        _ => panic!("Unexpected error")
+    }
+
     // Process transaction on test network
     let mut test_transaction = Transaction::new_with_payer(
         &test_instructions,
@@ -217,6 +258,40 @@ async fn test_token_vesting() {
     }
     if vesting_state.is_purged {
         panic!("Vesting state is purged");
+    }
+
+    // Try to process transaction without admin signature
+    let mut invalid_change_destination_instruction = [
+        change_destination(
+            &program_id,
+            &vesting_account_key,
+            &vesting_admin_account.pubkey(),
+            &new_destination_token_account.pubkey(),
+            seeds.clone()
+        ).unwrap()
+    ];
+    invalid_change_destination_instruction[0].accounts[1].is_signer = false;
+
+    let mut invalid_change_destination_transaction = Transaction::new_with_payer(
+        &invalid_change_destination_instruction,
+        Some(&payer.pubkey())
+    );
+
+    invalid_change_destination_transaction.partial_sign(
+        &[
+            &payer,
+        ],
+        recent_blockhash
+    );
+
+    let expected_err = banks_client.process_transaction(invalid_change_destination_transaction).await.map_err(|e| e.unwrap()).expect_err("Transaction cannot be processed.");
+    match expected_err {
+        TransactionError::InstructionError(0, inner_err) => {
+            if inner_err != InstructionError::MissingRequiredSignature {
+                panic!("Expected Missing signature error, found: {:?}", inner_err);
+            }
+        }
+        _ => panic!("Unexpected error")
     }
     
     let mut change_destination_transaction = Transaction::new_with_payer(
@@ -252,6 +327,41 @@ async fn test_token_vesting() {
         panic!("Vesting state is purged");
     }
 
+    // Try to process transaction without admin signature
+    let mut invalid_purge_instructions = [
+        purge(
+            &program_id,
+            &spl_token::id(),
+            &vesting_account_key,
+            &vesting_admin_account.pubkey(),
+            &vesting_token_account.pubkey(),
+            &vesting_admin_token_account.pubkey(),
+            seeds.clone()
+        ).unwrap()
+    ];
+    invalid_purge_instructions[0].accounts[1].is_signer = false;
+
+    let mut invalid_purge_transaction = Transaction::new_with_payer(
+        &invalid_purge_instructions,
+        Some(&payer.pubkey())
+    );
+
+    invalid_purge_transaction.partial_sign(
+        &[
+            &payer,
+        ],
+        recent_blockhash
+    );
+
+    let expected_err = banks_client.process_transaction(invalid_purge_transaction).await.map_err(|e| e.unwrap()).expect_err("Transaction cannot be processed.");
+    match expected_err {
+        TransactionError::InstructionError(0, inner_err) => {
+            if inner_err != InstructionError::MissingRequiredSignature {
+                panic!("Expected Missing signature error, found: {:?}", inner_err);
+            }
+        }
+        _ => panic!("Unexpected error")
+    }
 
     let mut purge_transaction = Transaction::new_with_payer(
         &purge_instructions,
@@ -311,7 +421,7 @@ async fn test_token_vesting() {
     match expected_err {
         TransactionError::InstructionError(0, inner_err) => {
             if inner_err != InstructionError::InvalidArgument {
-                panic!("Unexpected error");
+                panic!("Expected Invalid argument error, found: {:?}", inner_err);
             }
         }
         _ => panic!("Unexpected error")
@@ -345,7 +455,7 @@ async fn test_token_vesting() {
     match expected_err {
         TransactionError::InstructionError(0, inner_err) => {
             if inner_err != InstructionError::InvalidInstructionData {
-                panic!("Unexpected error");
+                panic!("Expected Invalid instruction data error, found: {:?}", inner_err);
             }
         }
         _ => panic!("Unexpected error")
@@ -368,7 +478,7 @@ async fn test_token_vesting() {
     match expected_err {
         TransactionError::InstructionError(0, inner_err) => {
             if inner_err != InstructionError::InvalidArgument {
-                panic!("Unexpected error");
+                panic!("Expected Invalid argument error, found: {:?}", inner_err);
             }
         }
         _ => panic!("Unexpected error")
@@ -391,7 +501,7 @@ async fn test_token_vesting() {
     match expected_err {
         TransactionError::InstructionError(0, inner_err) => {
             if inner_err != InstructionError::InvalidArgument {
-                panic!("Unexpected error");
+                panic!("Expected Invalid argument error, found: {:?}", inner_err);
             }
         }
         _ => panic!("Unexpected error")
