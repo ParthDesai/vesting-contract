@@ -88,11 +88,6 @@ impl Processor {
         let source_token_account = next_account_info(accounts_iter)?;
         let vesting_admin = next_account_info(accounts_iter)?;
 
-        if !vesting_admin.is_signer {
-            msg!("Provided vesting admin account should be signer");
-            return Err(ProgramError::MissingRequiredSignature);
-        }
-
         let vesting_account_key = Pubkey::create_program_address(&[&seeds], program_id)?;
         if vesting_account_key != *vesting_account.key {
             msg!("Provided vesting account is invalid");

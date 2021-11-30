@@ -34,12 +34,15 @@ impl Arbitrary for VestingInstruction {
                 let destination_token_address: Pubkey = Pubkey::new(&key_bytes);
                 let cliff_bytes: [u8; 8] = u.arbitrary()?;
                 let cliff = u64::from_le_bytes(cliff_bytes);
+                let tge_amount_bytes: [u8; 8] = u.arbitrary()?;
+                let tge_amount = u64::from_le_bytes(tge_amount_bytes);
                 return Ok(Self::Create {
                     seeds,
                     mint_address,
                     cliff,
                     destination_token_address,
                     schedules: schedules.to_vec(),
+                    tge_amount
                 });
             }
             2 => return Ok(Self::Unlock { seeds }),
@@ -87,7 +90,7 @@ pub enum VestingInstruction {
     ///   2. `[writable]` The vesting spl-token account
     ///   3. `[signer]` The source spl-token account owner
     ///   4. `[writable]` The source spl-token account
-    ///   5. `[signer]` Vesting admin
+    ///   5. `[]` Vesting admin
     Create {
         seeds: [u8; 32],
         mint_address: Pubkey,
@@ -327,7 +330,7 @@ pub fn create(
         AccountMeta::new(*vesting_token_account_key, false),
         AccountMeta::new_readonly(*source_token_account_owner_key, true),
         AccountMeta::new(*source_token_account_key, false),
-        AccountMeta::new_readonly(*vesting_admin_account_key, true)
+        AccountMeta::new_readonly(*vesting_admin_account_key, false)
     ];
     Ok(Instruction {
         program_id: *vesting_program_id,
