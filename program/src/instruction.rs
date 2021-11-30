@@ -93,6 +93,7 @@ pub enum VestingInstruction {
         mint_address: Pubkey,
         destination_token_address: Pubkey,
         cliff: u64,
+        tge_amount: u64,
         schedules: Vec<Schedule>,
     },
     /// Unlocks a simple vesting contract (SVC) - can only be invoked by the program itself
@@ -168,9 +169,14 @@ impl VestingInstruction {
                     .and_then(|slice| slice.try_into().ok())
                     .map(u64::from_le_bytes)
                     .ok_or(InvalidInstruction)?;
-                let number_of_schedules = rest[104..].len() / SCHEDULE_SIZE;
+                let tge_amount = rest
+                    .get(104..112)
+                    .and_then(|slice| slice.try_into().ok())
+                    .map(u64::from_le_bytes)
+                    .ok_or(InvalidInstruction)?;
+                let number_of_schedules = rest[112..].len() / SCHEDULE_SIZE;
                 let mut schedules: Vec<Schedule> = Vec::with_capacity(number_of_schedules);
-                let mut offset = 104;
+                let mut offset = 112;
                 for _ in 0..number_of_schedules {
                     let release_time = rest
                         .get(offset..offset + 8)
@@ -194,6 +200,7 @@ impl VestingInstruction {
                     cliff: cliff_time,
                     destination_token_address,
                     schedules,
+                    tge_amount
                 }
             }
             2 | 3 | 4 => {
@@ -231,12 +238,14 @@ impl VestingInstruction {
                 destination_token_address,
                 cliff,
                 schedules,
+                tge_amount,
             } => {
                 buf.push(1);
                 buf.extend_from_slice(seeds);
                 buf.extend_from_slice(&mint_address.to_bytes());
                 buf.extend_from_slice(&destination_token_address.to_bytes());
                 buf.extend_from_slice(&cliff.to_le_bytes());
+                buf.extend_from_slice(&tge_amount.to_le_bytes());
                 for s in schedules.iter() {
                     buf.extend_from_slice(&s.release_time.to_le_bytes());
                     buf.extend_from_slice(&s.amount.to_le_bytes());
@@ -300,12 +309,14 @@ pub fn create(
     vesting_admin_account_key: &Pubkey,
     schedules: Vec<Schedule>,
     seeds: [u8; 32],
+    tge_amount: u64,
     cliff: u64,
 ) -> Result<Instruction, ProgramError> {
     let data = VestingInstruction::Create {
         mint_address: *mint_address,
         seeds,
         cliff,
+        tge_amount,
         destination_token_address: *destination_token_account_key,
         schedules,
     }
@@ -412,6 +423,7 @@ mod test {
                 release_time: 250,
             }],
             mint_address: mint_address.clone(),
+            tge_amount: 41,
             destination_token_address,
         };
         let packed_create = original_create.pack();

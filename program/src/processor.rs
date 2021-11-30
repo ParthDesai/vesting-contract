@@ -77,6 +77,7 @@ impl Processor {
         destination_token_address: &Pubkey,
         schedules: Vec<Schedule>,
         cliff: u64,
+        tge_amount: u64
     ) -> ProgramResult {
         let accounts_iter = &mut accounts.iter();
 
@@ -141,6 +142,8 @@ impl Processor {
             is_purged: false,
             cliff,
             vesting_admin: *vesting_admin.key,
+            tge_amount,
+            is_tge_amount_paid: false
         };
 
         let mut data = vesting_account.data.borrow_mut();
@@ -150,7 +153,7 @@ impl Processor {
         state_header.pack_into_slice(&mut data);
 
         let mut offset = VestingScheduleHeader::LEN;
-        let mut total_amount: u64 = 0;
+        let mut total_amount: u64 = state_header.tge_amount;
 
         let mut current_release_time = cliff;
         for s in schedules.iter() {
@@ -224,7 +227,7 @@ impl Processor {
         }
 
         let packed_state = &vesting_account.data;
-        let header_state =
+        let mut header_state =
             VestingScheduleHeader::unpack(&packed_state.borrow()[..VestingScheduleHeader::LEN])?;
 
         if header_state.is_purged {
@@ -246,7 +249,14 @@ impl Processor {
 
         // Unlock the schedules that have reached maturity
         let clock = Clock::from_account_info(&clock_sysvar_account)?;
-        let mut total_amount_to_transfer = 0;
+        let mut total_amount_to_transfer = if header_state.is_tge_amount_paid {
+            0
+        } else {
+            msg!("Paying tge amount");
+            header_state.is_tge_amount_paid = true;
+            header_state.tge_amount
+        };
+
         let mut schedules = unpack_schedules(&packed_state.borrow()[VestingScheduleHeader::LEN..])?;
 
         for s in schedules.iter_mut() {
@@ -279,6 +289,8 @@ impl Processor {
             ],
             &[&[&seeds]],
         )?;
+
+        header_state.pack_into_slice(&mut vesting_account.data.borrow_mut());
 
         // Reset released amounts to 0. This makes the simple unlock safe with complex scheduling contracts
         pack_schedules_into_slice(
@@ -453,6 +465,7 @@ impl Processor {
                 destination_token_address,
                 schedules,
                 cliff,
+                tge_amount
             } => {
                 msg!("Instruction: Create Schedule");
                 Self::process_create(
@@ -462,7 +475,8 @@ impl Processor {
                     &mint_address,
                     &destination_token_address,
                     schedules,
-                    cliff
+                    cliff,
+                    tge_amount
                 )
             },
             VestingInstruction::Purge {

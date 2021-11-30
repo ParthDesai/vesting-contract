@@ -111,16 +111,19 @@ async fn test_token_vesting() {
             &source_token_account.pubkey(), 
             &mint_authority.pubkey(), 
             &[], 
-            100
+            200
         ).unwrap()
     ];
 
-    let total_amount = 60;
+    let total_amount = 89;
+    let tge_amount = 50;
     let schedules = vec![
-        Schedule {amount: total_amount / 3, release_time: start_time},
-        Schedule {amount: total_amount / 3, release_time: start_time + 60000},
-        Schedule {amount: total_amount / 3, release_time: start_time + 80000}
+        Schedule {amount: 13, release_time: start_time},
+        Schedule {amount: 13, release_time: start_time + 60000},
+        Schedule {amount: 13, release_time: start_time + 80000}
     ];
+    let expected_amount_in_dest = tge_amount + schedules[0].amount;
+    let expected_amount_in_admin = total_amount - expected_amount_in_dest;
 
     let test_instructions = [
         create(
@@ -135,6 +138,7 @@ async fn test_token_vesting() {
             &vesting_admin_account.pubkey(),
             schedules.clone(),
             seeds.clone(),
+            tge_amount,
             2
         ).unwrap(),
         unlock(
@@ -199,6 +203,7 @@ async fn test_token_vesting() {
             &vesting_admin_account.pubkey(),
             schedules,
             seeds.clone(),
+            13,
             2
         ).unwrap(),
     ];
@@ -259,6 +264,16 @@ async fn test_token_vesting() {
     if vesting_state.is_purged {
         panic!("Vesting state is purged");
     }
+    if !vesting_state.is_tge_amount_paid {
+        panic!("TGE amount must be paid");
+    }
+
+    let destination_account = banks_client.get_account(destination_token_account.pubkey()).await.unwrap().unwrap();
+    let destination_token_account_state = state::Account::unpack(&destination_account.data).unwrap();
+    if destination_token_account_state.amount != expected_amount_in_dest {
+        panic!("Destination token account does not have correct balance. Expected: {}, found: {}", expected_amount_in_dest, destination_token_account_state.amount);
+    }
+
 
     // Try to process transaction without admin signature
     let mut invalid_change_destination_instruction = [
@@ -398,8 +413,8 @@ async fn test_token_vesting() {
 
     let admin_token_account = banks_client.get_account(vesting_admin_token_account.pubkey()).await.unwrap().unwrap();
     let admin_token_account_state = state::Account::unpack(&admin_token_account.data).unwrap();
-    if admin_token_account_state.amount != total_amount - (total_amount / 3) {
-        panic!("Admin token account does not have correct balance. {}", admin_token_account_state.amount);
+    if admin_token_account_state.amount != expected_amount_in_admin {
+        panic!("Admin token account does not have correct balance. Expected: {}, found: {}", expected_amount_in_admin, admin_token_account_state.amount);
     }
 
     let recent_blockhash = banks_client.get_recent_blockhash().await.unwrap();

@@ -15,13 +15,15 @@ pub struct VestingScheduleHeader {
     pub vesting_admin: Pubkey,
     pub is_initialized: bool,
     pub is_purged: bool,
+    pub is_tge_amount_paid: bool,
     pub cliff: u64,
+    pub tge_amount: u64
 }
 
 impl Sealed for VestingScheduleHeader {}
 
 impl Pack for VestingScheduleHeader {
-    const LEN: usize = 106;
+    const LEN: usize = 115;
 
     fn pack_into_slice(&self, target: &mut [u8]) {
         let destination_address_bytes = self.destination_address.to_bytes();
@@ -41,10 +43,16 @@ impl Pack for VestingScheduleHeader {
 
         target[96] = self.is_initialized as u8;
         target[97] = self.is_purged as u8;
+        target[98] = self.is_tge_amount_paid as u8;
 
         let cliff_bytes = self.cliff.to_le_bytes();
-        for i in 98..106 {
-            target[i] = cliff_bytes[i - 98];
+        for i in 99..107 {
+            target[i] = cliff_bytes[i - 99];
+        }
+
+        let tge_amount_bytes = self.tge_amount.to_le_bytes();
+        for i in 107..115 {
+            target[i] = tge_amount_bytes[i - 107];
         }
     }
 
@@ -59,12 +67,19 @@ impl Pack for VestingScheduleHeader {
 
         let is_initialized = src[96] == 1;
         let is_purged = src[97] == 1;
+        let is_tge_amount_paid = src[98] == 1;
 
         let mut le_bytes = [0; 8];
-        for i in 98..106 {
-            le_bytes[i - 98] = src[i];
+        for i in 99..107 {
+            le_bytes[i - 99] = src[i];
         }
         let cliff = u64::from_le_bytes(le_bytes);
+
+        let mut le_bytes = [0; 8];
+        for i in 107..115 {
+            le_bytes[i - 107] = src[i];
+        }
+        let tge_amount = u64::from_le_bytes(le_bytes);
 
         Ok(Self {
             destination_address,
@@ -73,6 +88,8 @@ impl Pack for VestingScheduleHeader {
             is_initialized,
             cliff,
             is_purged,
+            tge_amount,
+            is_tge_amount_paid
         })
     }
 }
@@ -147,7 +164,9 @@ mod tests {
             vesting_admin: Pubkey::new_unique(),
             is_initialized: true,
             is_purged: false,
-            cliff: 50
+            is_tge_amount_paid: true,
+            cliff: 50,
+            tge_amount: 34
         };
         let schedule_state_0 = VestingSchedule {
             release_time: 30767976,
@@ -158,7 +177,7 @@ mod tests {
             amount: 420,
         };
         let state_size = VestingScheduleHeader::LEN + 2 * VestingSchedule::LEN;
-        let mut state_array = [0u8; 138];
+        let mut state_array = [0u8; 147];
         header_state.pack_into_slice(&mut state_array[..VestingScheduleHeader::LEN]);
         schedule_state_0.pack_into_slice(
             &mut state_array
@@ -173,7 +192,9 @@ mod tests {
         expected.extend_from_slice(&header_state.vesting_admin.to_bytes());
         expected.extend_from_slice(&[header_state.is_initialized as u8]);
         expected.extend_from_slice(&[header_state.is_purged as u8]);
+        expected.extend_from_slice(&[header_state.is_tge_amount_paid as u8]);
         expected.extend_from_slice(&header_state.cliff.to_le_bytes());
+        expected.extend_from_slice(&header_state.tge_amount.to_le_bytes());
         expected.extend_from_slice(&schedule_state_0.release_time.to_le_bytes());
         expected.extend_from_slice(&schedule_state_0.amount.to_le_bytes());
         expected.extend_from_slice(&schedule_state_1.release_time.to_le_bytes());
@@ -194,7 +215,9 @@ mod tests {
             vesting_admin: Pubkey::new_unique(),
             is_initialized: true,
             is_purged: true,
-            cliff: 54
+            is_tge_amount_paid: false,
+            cliff: 54,
+            tge_amount: 43
         };
 
         let mut packed_header_state = [0u8; VestingScheduleHeader::LEN];
